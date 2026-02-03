@@ -6,8 +6,8 @@
 //
 
 import Foundation
+import HuggingFace
 import MLX
-import Hub
 
 // MARK: - Predefined Voices
 
@@ -116,7 +116,7 @@ private func downloadFromURL(_ urlString: String) async throws -> URL {
     return cachedFile
 }
 
-/// Download from HuggingFace Hub
+/// Download from HuggingFace Hub using HubClient
 private func downloadFromHuggingFace(_ hfPath: String) async throws -> URL {
     // Parse hf:// URL
     // Format: hf://owner/repo/path/to/file@revision or hf://owner/repo/path/to/file
@@ -137,19 +137,39 @@ private func downloadFromHuggingFace(_ hfPath: String) async throws -> URL {
     var filename = components.dropFirst(2).joined(separator: "/")
 
     // Extract revision if present (e.g., file.safetensors@main)
-    var revision: String? = nil
+    var revision: String = "main"
     if filename.contains("@") {
         let fileParts = filename.split(separator: "@", maxSplits: 1)
         filename = String(fileParts[0])
         revision = String(fileParts[1])
     }
 
-    // Use Hub library to download
-    let hub = HubApi.shared
-    let repo = Hub.Repo(id: repoId)
+    // Use HuggingFace client to download
+    let client = HubClient.default
+    let cache = client.cache ?? HubCache.default
 
-    let snapshotURL = try await hub.snapshot(from: repo, matching: [filename])
-    let fileURL = snapshotURL.appendingPathComponent(filename)
+    guard let repoID = Repo.ID(rawValue: repoId) else {
+        throw PocketTTSError.weightLoadingFailed("Invalid HuggingFace repository ID: \(repoId)")
+    }
+
+    // Use persistent cache directory based on repo ID
+    let modelSubdir = repoID.description.replacingOccurrences(of: "/", with: "_")
+    let modelDirectory = cache.cacheDirectory.appendingPathComponent(modelSubdir)
+    let fileURL = modelDirectory.appendingPathComponent(filename)
+
+    // Check if file is already cached
+    if FileManager.default.fileExists(atPath: fileURL.path) {
+        return fileURL
+    }
+
+    // Download the specific file
+    _ = try await client.downloadSnapshot(
+        of: repoID,
+        kind: .model,
+        to: modelDirectory,
+        revision: revision,
+        matching: [filename]
+    )
 
     guard FileManager.default.fileExists(atPath: fileURL.path) else {
         throw PocketTTSError.weightLoadingFailed("File not found after download: \(filename)")

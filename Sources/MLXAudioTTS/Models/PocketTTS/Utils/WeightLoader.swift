@@ -6,9 +6,9 @@
 //
 
 import Foundation
+import HuggingFace
 import MLX
 import MLXNN
-import Hub
 
 // MARK: - Weight Sanitization
 
@@ -309,15 +309,55 @@ public func loadPocketTTSWeightsFromHub(
     filename: String = "model.safetensors",
     progressHandler: @escaping @Sendable (Progress) -> Void
 ) async throws {
-    let hub = HubApi.shared
-    let repo = Hub.Repo(id: repoId)
-
-    // Download snapshot
-    let snapshotURL = try await hub.snapshot(from: repo, matching: [filename], progressHandler: progressHandler)
-    let weightsURL = snapshotURL.appendingPathComponent(filename)
+    let modelDirectory = try await downloadPocketTTSModel(repoId: repoId, matching: [filename])
+    let weightsURL = modelDirectory.appendingPathComponent(filename)
 
     // Load weights (non-strict to allow partial loading during development)
     try loadPocketTTSWeights(model: model, from: weightsURL, strict: false)
+}
+
+/// Download PocketTTS model files from HuggingFace using HubClient
+/// - Parameters:
+///   - repoId: HuggingFace repository ID
+///   - matching: File patterns to download (e.g., ["*.safetensors", "*.json"])
+/// - Returns: Local directory URL containing downloaded files
+public func downloadPocketTTSModel(
+    repoId: String,
+    matching patterns: [String] = ["*.safetensors", "*.json", "tokenizer.model"]
+) async throws -> URL {
+    let client = HubClient.default
+    let cache = client.cache ?? HubCache.default
+
+    guard let repoID = Repo.ID(rawValue: repoId) else {
+        throw PocketTTSError.configurationMissing("Invalid HuggingFace repository ID: \(repoId)")
+    }
+
+    // Use persistent cache directory based on repo ID
+    let modelSubdir = repoID.description.replacingOccurrences(of: "/", with: "_")
+    let modelDirectory = cache.cacheDirectory.appendingPathComponent(modelSubdir)
+
+    // Check if model is already cached
+    let configExists = FileManager.default.fileExists(
+        atPath: modelDirectory.appendingPathComponent("config.json").path
+    )
+    let hasSafetensors = (try? FileManager.default.contentsOfDirectory(at: modelDirectory, includingPropertiesForKeys: nil))?
+        .contains { $0.pathExtension == "safetensors" } ?? false
+
+    if configExists && hasSafetensors {
+        // Use cached model
+        return modelDirectory
+    }
+
+    // Download model files
+    _ = try await client.downloadSnapshot(
+        of: repoID,
+        kind: .model,
+        to: modelDirectory,
+        revision: "main",
+        matching: patterns
+    )
+
+    return modelDirectory
 }
 
 // MARK: - Separate Component Loading
@@ -384,40 +424,32 @@ public struct PocketTTSRepoInfo {
 /// - Parameters:
 ///   - repoId: HuggingFace repository ID (default: smdesai/pocket-tts)
 ///   - mimi: PocketMimi codec instance for audio decoding
-///   - progressHandler: Download progress callback
+///   - progressHandler: Download progress callback (unused with HuggingFace client)
 /// - Returns: Initialized PocketTTSModel with loaded weights
 public func loadPocketTTSFromHub(
     repoId: String = PocketTTSRepoInfo.defaultRepoId,
     mimi: PocketMimi,
     progressHandler: @escaping @Sendable (Progress) -> Void
 ) async throws -> PocketTTSModel {
-    let hub = HubApi.shared
-    let repo = Hub.Repo(id: repoId)
-
-    // Download config, weights, and tokenizer
-    let files = [
-        PocketTTSRepoInfo.defaultConfigFile,
-        PocketTTSRepoInfo.defaultWeightsFile,
-        PocketTTSRepoInfo.defaultTokenizerFile,
-        PocketTTSRepoInfo.tokenizerConfigFile
-    ]
-
-    let snapshotURL = try await hub.snapshot(from: repo, matching: files, progressHandler: progressHandler)
+    // Download all model files using HuggingFace client
+    let modelDirectory = try await downloadPocketTTSModel(
+        repoId: repoId,
+        matching: ["*.safetensors", "*.json", "tokenizer.model"]
+    )
 
     // Load config
-    let configURL = snapshotURL.appendingPathComponent(PocketTTSRepoInfo.defaultConfigFile)
+    let configURL = modelDirectory.appendingPathComponent(PocketTTSRepoInfo.defaultConfigFile)
     let config = try PocketTTSModelConfig.load(from: configURL)
 
-    // Create model (tokenizer will be loaded from the same repo)
-    let model = try await PocketTTSModel.fromConfig(
+    // Create model from local folder (tokenizer loaded from same directory)
+    let model = try PocketTTSModel.fromLocalFolder(
         config,
         mimi: mimi,
-        repoId: repoId,
-        progressHandler: progressHandler
+        modelFolder: modelDirectory
     )
 
     // Load weights
-    let weightsURL = snapshotURL.appendingPathComponent(PocketTTSRepoInfo.defaultWeightsFile)
+    let weightsURL = modelDirectory.appendingPathComponent(PocketTTSRepoInfo.defaultWeightsFile)
     try loadPocketTTSWeights(model: model, from: weightsURL, strict: false)
 
     return model

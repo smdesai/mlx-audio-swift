@@ -7,7 +7,7 @@
 //
 
 import Foundation
-import Hub
+import HuggingFace
 import MLX
 
 // MARK: - HuggingFace Repository
@@ -79,7 +79,7 @@ public class SentencePieceTokenizer: PocketTokenizer {
     /// - Parameters:
     ///   - nBins: Expected vocabulary size
     ///   - repoId: HuggingFace repository ID (default: smdesai/pocket-tts)
-    ///   - progressHandler: Optional progress callback for download
+    ///   - progressHandler: Optional progress callback for download (unused with HuggingFace client)
     public init(
         nBins: Int,
         repoId: String = PocketTTSRepo.repoId,
@@ -87,26 +87,30 @@ public class SentencePieceTokenizer: PocketTokenizer {
     ) async throws {
         self.nBins = nBins
 
-        // Download tokenizer.model from HuggingFace Hub
-        let hub = HubApi.shared
-        let repo = Hub.Repo(id: repoId)
+        // Download tokenizer.model from HuggingFace using HubClient
+        let client = HubClient.default
+        let cache = client.cache ?? HubCache.default
 
-        // Download the tokenizer.model file
-        let modelFolder: URL
-        if let handler = progressHandler {
-            modelFolder = try await hub.snapshot(
-                from: repo,
-                matching: [PocketTTSRepo.tokenizerModelFile],
-                progressHandler: handler
-            )
-        } else {
-            modelFolder = try await hub.snapshot(
-                from: repo,
+        guard let repoID = Repo.ID(rawValue: repoId) else {
+            throw PocketTTSError.tokenizerError("Invalid HuggingFace repository ID: \(repoId)")
+        }
+
+        // Use persistent cache directory based on repo ID
+        let modelSubdir = repoID.description.replacingOccurrences(of: "/", with: "_")
+        let modelDirectory = cache.cacheDirectory.appendingPathComponent(modelSubdir)
+        let tokenizerModelPath = modelDirectory.appendingPathComponent(PocketTTSRepo.tokenizerModelFile)
+
+        // Check if already cached
+        if !FileManager.default.fileExists(atPath: tokenizerModelPath.path) {
+            // Download the tokenizer.model file
+            _ = try await client.downloadSnapshot(
+                of: repoID,
+                kind: .model,
+                to: modelDirectory,
+                revision: "main",
                 matching: [PocketTTSRepo.tokenizerModelFile]
             )
         }
-
-        let tokenizerModelPath = modelFolder.appendingPathComponent(PocketTTSRepo.tokenizerModelFile)
 
         // Verify file exists
         guard FileManager.default.fileExists(atPath: tokenizerModelPath.path) else {
