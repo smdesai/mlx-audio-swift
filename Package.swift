@@ -67,12 +67,34 @@ let package = Package(
             path: "Sources/MLXAudioCodecs"
         ),
 
+        // MARK: - SentencePiece xcframework
+        .binaryTarget(
+            name: "SentencePiece",
+            path: "SentencePiece.xcframework"
+        ),
+
+        // MARK: - SentencePieceBridge (C++ wrapper)
+        .target(
+            name: "SentencePieceBridge",
+            dependencies: ["SentencePiece"],
+            path: "Sources/SentencePieceBridge",
+            publicHeadersPath: ".",
+            cxxSettings: [
+                .headerSearchPath("."),
+                .unsafeFlags(["-std=c++17"])
+            ],
+            linkerSettings: [
+                .linkedFramework("SentencePiece")
+            ]
+        ),
+
         // MARK: - MLXAudioTTS
         .target(
             name: "MLXAudioTTS",
             dependencies: [
                 "MLXAudioCore",
                 "MLXAudioCodecs",
+                "SentencePieceBridge",
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),

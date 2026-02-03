@@ -112,11 +112,13 @@ enum App {
         try writeWavFile(samples: audioData, sampleRate: sampleRate, outputURL: outputURL)
         print("Wrote WAV to \(outputURL.path)")
 
-        print(String(format: "Finished generation in %0.2fs", CFAbsoluteTimeGetCurrent() - started))
-        print("Memory usage:\n\(Memory.snapshot())")
-
         let elapsed = CFAbsoluteTimeGetCurrent() - started
-        print(String(format: "Done. Elapsed: %.2fs", elapsed))
+        let audioDuration = Double(audioData.count) / sampleRate
+        let rtfx = audioDuration / elapsed
+
+        print(String(format: "Finished generation in %.2fs", elapsed))
+        print(String(format: "Audio duration: %.2fs | RTFx: %.1fx", audioDuration, rtfx))
+        print("Memory usage:\n\(Memory.snapshot())")
     }
 
     private static func makeOutputURL(outputPath: String?) -> URL {

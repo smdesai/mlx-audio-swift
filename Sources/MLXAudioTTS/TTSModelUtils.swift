@@ -25,6 +25,13 @@ public enum TTSModelUtils {
         modelRepo: String,
         hfToken: String? = nil
     ) async throws -> SpeechGenerationModel {
+        // Check if it's a local path
+        if modelRepo.hasPrefix("/") || modelRepo.hasPrefix("./") {
+            // Infer model type from local path
+            let modelType = inferModelType(from: modelRepo)
+            return try await loadModel(modelRepo: modelRepo, modelType: modelType)
+        }
+
         guard let repoID = Repo.ID(rawValue: modelRepo) else {
             throw TTSModelUtilsError.invalidRepositoryID(modelRepo)
         }
@@ -51,6 +58,8 @@ public enum TTSModelUtils {
             return try await MarvisTTSModel.fromPretrained(modelRepo)
         case "soprano_tts", "soprano":
             return try await SopranoModel.fromPretrained(modelRepo)
+        case "pocket_tts", "pockettts", "pocket":
+            return try await PocketTTSModel.fromPretrained(modelRepo)
         default:
             throw TTSModelUtilsError.unsupportedModelType(modelType ?? resolvedType)
         }
@@ -76,6 +85,9 @@ public enum TTSModelUtils {
         }
         if lower.contains("csm") || lower.contains("sesame") {
             return "csm"
+        }
+        if lower.contains("pocket") {
+            return "pocket_tts"
         }
         return nil
     }
