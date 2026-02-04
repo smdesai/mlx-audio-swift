@@ -159,19 +159,25 @@ public class PocketTTSModel: Module, @unchecked Sendable {
 
     // MARK: - Voice Conditioning
 
+    /// Default max seconds for voice cloning audio (reduced to save memory on mobile)
+    /// 10 seconds is typically enough to capture voice characteristics
+    public static let defaultVoiceCloningMaxSeconds: Float = 10.0
+
     /// Get state for voice cloning from an audio file
     /// - Parameters:
     ///   - audioURL: URL to audio file (WAV, MP3, FLAC supported via AVFoundation)
-    ///   - truncate: Whether to truncate to 30 seconds max (default: true)
+    ///   - maxSeconds: Maximum audio length in seconds (default: 10s to save memory)
     /// - Returns: PocketTTSState primed with the speaker's voice characteristics
-    public func getStateForAudioFile(_ audioURL: URL, truncate: Bool = true) throws -> PocketTTSState {
+    public func getStateForAudioFile(_ audioURL: URL, maxSeconds: Float = defaultVoiceCloningMaxSeconds) throws -> PocketTTSState {
         // 1. Load audio file
         let (originalSampleRate, audioData) = try loadAudioArray(from: audioURL)
         var samples = audioData.asArray(Float.self)
 
-        // 2. Truncate to 30 seconds if requested
-        if truncate {
-            samples = truncateAudioSamples(samples, maxSeconds: 30.0, sampleRate: originalSampleRate)
+        // 2. Truncate to max seconds to limit memory usage
+        // Voice characteristics can be captured in 10s; longer audio causes
+        // large attention tensors [B, H, T, T] that consume significant RAM
+        if maxSeconds > 0 {
+            samples = truncateAudioSamples(samples, maxSeconds: maxSeconds, sampleRate: originalSampleRate)
         }
 
         // 3. Resample to model sample rate (24kHz)
@@ -186,7 +192,10 @@ public class PocketTTSModel: Module, @unchecked Sendable {
         // 5. Encode to conditioning
         let conditioning = encodeAudio(audio)
 
-        // 6. Return primed state
+        // 6. Force evaluation to free encoder intermediate tensors
+        MLX.eval(conditioning)
+
+        // 7. Return primed state
         return getStateForAudioPrompt(audioConditioning: conditioning)
     }
 
@@ -210,6 +219,48 @@ public class PocketTTSModel: Module, @unchecked Sendable {
     public func getStateForVoice(_ voiceName: String) async throws -> PocketTTSState {
         let voiceEmbedding = try await loadPredefinedVoice(voiceName)
         return getStateForAudioPrompt(audioConditioning: voiceEmbedding)
+    }
+
+    /// Get state from a pre-exported voice embedding file (safetensors)
+    /// This is memory-efficient as it skips the encoder entirely
+    /// - Parameter embeddingURL: Path to .safetensors file with 'audio_prompt' key
+    /// - Returns: PocketTTSState primed with the voice
+    public func getStateForVoiceEmbedding(_ embeddingURL: URL) throws -> PocketTTSState {
+        let voiceEmbedding = try loadCustomVoiceEmbedding(from: embeddingURL)
+        return getStateForAudioPrompt(audioConditioning: voiceEmbedding)
+    }
+
+    /// Export voice embedding from audio file to safetensors
+    /// Use this to pre-process voices for memory-efficient loading later
+    /// - Parameters:
+    ///   - audioURL: Source audio file (WAV, MP3, FLAC)
+    ///   - outputURL: Where to save the .safetensors embedding
+    ///   - maxSeconds: Maximum audio length (default: 10s)
+    public func exportVoiceEmbedding(
+        from audioURL: URL,
+        to outputURL: URL,
+        maxSeconds: Float = defaultVoiceCloningMaxSeconds
+    ) throws {
+        // Load and preprocess audio
+        let (originalSampleRate, audioData) = try loadAudioArray(from: audioURL)
+        var samples = audioData.asArray(Float.self)
+
+        if maxSeconds > 0 {
+            samples = truncateAudioSamples(samples, maxSeconds: maxSeconds, sampleRate: originalSampleRate)
+        }
+
+        let targetSampleRate = Double(optionalSampleRate ?? 24000)
+        if Double(originalSampleRate) != targetSampleRate {
+            samples = resampleAudioLinear(samples, from: Double(originalSampleRate), to: targetSampleRate)
+        }
+
+        // Encode to embedding
+        let audio = MLXArray(samples).reshaped([1, 1, samples.count])
+        let embedding = encodeAudio(audio)
+        MLX.eval(embedding)
+
+        // Save to safetensors using global function from PocketVoiceLoader
+        try MLXAudioTTS.exportVoiceEmbedding(embedding, to: outputURL)
     }
 
     // MARK: - Audio Generation

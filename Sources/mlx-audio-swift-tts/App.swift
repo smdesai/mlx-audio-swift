@@ -39,6 +39,8 @@ enum App {
                 text: args.text,
                 voice: args.voice,
                 voiceFile: args.voiceFile,
+                voiceEmbedding: args.voiceEmbedding,
+                exportVoice: args.exportVoice,
                 outputPath: args.outputPath,
                 refAudioPath: args.refAudioPath,
                 refText: args.refText,
@@ -55,9 +57,11 @@ enum App {
 
     private static func run(
         model: String,
-        text: String,
+        text: String?,
         voice: String?,
         voiceFile: String?,
+        voiceEmbedding: String?,
+        exportVoice: String?,
         outputPath: String?,
         refAudioPath: String?,
         refText: String?,
@@ -85,6 +89,25 @@ enum App {
             }
         }
 
+        // Handle voice embedding export for PocketTTS models
+        if let exportVoicePath = exportVoice, let pocketModel = loadedModel as? PocketTTSModel {
+            let audioURL = resovleURL(path: exportVoicePath)
+            let outputURL = makeOutputURL(outputPath: outputPath, defaultExtension: "safetensors")
+            print("Exporting voice embedding from: \(audioURL.path)")
+            let started = CFAbsoluteTimeGetCurrent()
+            try pocketModel.exportVoiceEmbedding(from: audioURL, to: outputURL)
+            let elapsed = CFAbsoluteTimeGetCurrent() - started
+            print("Exported voice embedding to: \(outputURL.path)")
+            print(String(format: "Export completed in %.2fs", elapsed))
+            print("Memory usage:\n\(Memory.snapshot())")
+            return
+        }
+
+        // Text is required for generation
+        guard let text = text, !text.isEmpty else {
+            throw CLIError.missingValue("--text")
+        }
+
         print("Generating")
         let started = CFAbsoluteTimeGetCurrent()
 
@@ -96,12 +119,27 @@ enum App {
             refAudio = nil
         }
 
-        // Handle voice cloning for PocketTTS models
+        // Handle voice cloning/embedding for PocketTTS models
         let audioData: [Float]
-        if let voiceFilePath = voiceFile, let pocketModel = loadedModel as? PocketTTSModel {
-            let voiceURL = resovleURL(path: voiceFilePath)
-            print("Loading voice from: \(voiceURL.path)")
-            let state = try pocketModel.getStateForAudioFile(voiceURL)
+        if let pocketModel = loadedModel as? PocketTTSModel {
+            let state: PocketTTSState
+            if let voiceEmbeddingPath = voiceEmbedding {
+                // Use pre-exported voice embedding (memory efficient ~700MB)
+                let embeddingURL = resovleURL(path: voiceEmbeddingPath)
+                print("Loading voice embedding from: \(embeddingURL.path)")
+                state = try pocketModel.getStateForVoiceEmbedding(embeddingURL)
+            } else if let voiceFilePath = voiceFile {
+                // Clone voice from audio file (higher memory ~1.8GB)
+                let voiceURL = resovleURL(path: voiceFilePath)
+                print("Loading voice from: \(voiceURL.path)")
+                state = try pocketModel.getStateForAudioFile(voiceURL)
+            } else if let voiceName = voice {
+                // Use predefined voice
+                state = try await pocketModel.getStateForVoice(voiceName)
+            } else {
+                // Default voice
+                state = try await pocketModel.getStateForVoice("alba")
+            }
             pocketModel.temp = temperature
             let audio = pocketModel.generateAudio(state: state, text: text)
             audioData = audio.asArray(Float.self)
@@ -120,7 +158,7 @@ enum App {
             ).asArray(Float.self)
         }
 
-        let outputURL = makeOutputURL(outputPath: outputPath)
+        let outputURL = makeOutputURL(outputPath: outputPath, defaultExtension: "wav")
         let sampleRate = Double(loadedModel.sampleRate)
         try writeWavFile(samples: audioData, sampleRate: sampleRate, outputURL: outputURL)
         print("Wrote WAV to \(outputURL.path)")
@@ -134,8 +172,9 @@ enum App {
         print("Memory usage:\n\(Memory.snapshot())")
     }
 
-    private static func makeOutputURL(outputPath: String?) -> URL {
-        let outputName = outputPath?.isEmpty == false ? outputPath! : "output.wav"
+    private static func makeOutputURL(outputPath: String?, defaultExtension: String = "wav") -> URL {
+        let defaultName = "output.\(defaultExtension)"
+        let outputName = outputPath?.isEmpty == false ? outputPath! : defaultName
         if outputName.hasPrefix("/") {
             return URL(fileURLWithPath: outputName)
         }
@@ -187,9 +226,11 @@ enum CLIError: Error, CustomStringConvertible {
 
 struct CLI {
     let model: String
-    let text: String
+    let text: String?
     let voice: String?
     let voiceFile: String?
+    let voiceEmbedding: String?  // Pre-exported voice embedding (.safetensors)
+    let exportVoice: String?     // Audio file to export as embedding
     let outputPath: String?
     let refAudioPath: String?
     let refText: String?
@@ -201,6 +242,8 @@ struct CLI {
         var text: String?
         var voice: String? = nil
         var voiceFile: String? = nil
+        var voiceEmbedding: String? = nil
+        var exportVoice: String? = nil
         var outputPath: String? = nil
         var model = "Marvis-AI/marvis-tts-250m-v0.2-MLX-8bit"
         var refAudioPath: String? = nil
@@ -221,6 +264,12 @@ struct CLI {
             case "--voice-file", "-vf":
                 guard let v = it.next() else { throw CLIError.missingValue(arg) }
                 voiceFile = v
+            case "--voice-embedding", "-ve":
+                guard let v = it.next() else { throw CLIError.missingValue(arg) }
+                voiceEmbedding = v
+            case "--export-voice":
+                guard let v = it.next() else { throw CLIError.missingValue(arg) }
+                exportVoice = v
             case "--model":
                 guard let v = it.next() else { throw CLIError.missingValue(arg) }
                 model = v
@@ -257,15 +306,20 @@ struct CLI {
             }
         }
 
-        guard let finalText = text, !finalText.isEmpty else {
-            throw CLIError.missingValue("--text")
+        // Text is required unless exporting a voice
+        if exportVoice == nil {
+            guard let finalText = text, !finalText.isEmpty else {
+                throw CLIError.missingValue("--text")
+            }
         }
 
         return CLI(
             model: model,
-            text: finalText,
+            text: text,
             voice: voice,
             voiceFile: voiceFile,
+            voiceEmbedding: voiceEmbedding,
+            exportVoice: exportVoice,
             outputPath: outputPath,
             refAudioPath: refAudioPath,
             refText: refText,
@@ -285,6 +339,7 @@ struct CLI {
           -t, --text <string>           Text to synthesize (required if not passed as trailing arg)
           -v, --voice <name>            Voice id (predefined voice name)
           -vf, --voice-file <path>      Path to audio file for voice cloning (PocketTTS only, WAV/MP3/FLAC)
+          -ve, --voice-embedding <path> Path to pre-exported voice embedding (.safetensors)
               --model <repo>            HF repo id. Default: Marvis-AI/marvis-tts-250m-v0.2-MLX-8bit
           -o, --output <path>           Output WAV path. Default: ./output.wav
               --ref_audio <path>        Path to reference audio
@@ -296,8 +351,13 @@ struct CLI {
 
         Voice Cloning (PocketTTS):
           Use --voice-file to clone a voice from an audio file. The audio will be
-          truncated to 30 seconds and resampled to 24kHz if needed.
+          truncated to 10 seconds (to save memory) and resampled to 24kHz if needed.
           Example: \(exe) --model smdesai/pocket-tts --text "Hello" --voice-file voice.wav
+
+        Pre-exported Voice Embeddings (memory efficient):
+          For lower memory usage (~700MB vs ~1.8GB), pre-export voice embeddings:
+          1. Export: \(exe) --model smdesai/pocket-tts --export-voice input.wav --output voice.safetensors
+          2. Use:    \(exe) --model smdesai/pocket-tts --text "Hello" --voice-embedding voice.safetensors
         """)
     }
 }

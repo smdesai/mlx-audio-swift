@@ -183,12 +183,17 @@ public class PocketMimiAdapter: Module, @unchecked Sendable {
 
         // Encode through SEANet encoder
         var emb = encoder(x_padded)
+        MLX.eval(emb)  // Force evaluation to free input tensor memory
 
         // Transform through encoder transformer
+        // Note: Attention creates [B, H, T, T] tensors which can be very large
+        // for long audio. eval() helps free intermediates after each step.
         emb = encoderTransformer(emb, cache: encoderCache)[0]
+        MLX.eval(emb)  // Force evaluation to free attention intermediates
 
         // Downsample to target frame rate
         emb = downsample(emb)
+        MLX.eval(emb)
 
         return emb
     }

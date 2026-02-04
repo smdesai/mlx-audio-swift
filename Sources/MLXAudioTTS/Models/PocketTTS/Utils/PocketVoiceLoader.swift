@@ -178,6 +178,32 @@ private func downloadFromHuggingFace(_ hfPath: String) async throws -> URL {
     return fileURL
 }
 
+// MARK: - Custom Voice Export
+
+/// Export a custom voice embedding to safetensors format
+/// This allows pre-processing audio files to avoid runtime encoding overhead
+/// - Parameters:
+///   - embedding: The voice embedding from encodeAudio() with shape [1, T, 1024]
+///   - outputURL: Where to save the safetensors file
+public func exportVoiceEmbedding(_ embedding: MLXArray, to outputURL: URL) throws {
+    let arrays: [String: MLXArray] = ["audio_prompt": embedding]
+    try MLX.save(arrays: arrays, url: outputURL)
+}
+
+/// Load a custom voice embedding from a local safetensors file
+/// This uses the same format as predefined voices
+/// - Parameter fileURL: Path to the .safetensors file
+/// - Returns: Voice embedding tensor [1, T, D]
+public func loadCustomVoiceEmbedding(from fileURL: URL) throws -> MLXArray {
+    let weights = try MLX.loadArrays(url: fileURL)
+
+    guard let audioPrompt = weights["audio_prompt"] else {
+        throw PocketTTSError.weightLoadingFailed("Voice file missing 'audio_prompt' key")
+    }
+
+    return audioPrompt
+}
+
 // MARK: - Voice Info
 
 /// Voice metadata

@@ -155,14 +155,49 @@ public class PocketTTSSession: ObservableObject {
     /// Set voice from audio file for voice cloning
     /// - Parameters:
     ///   - audioURL: URL to audio file (WAV, MP3, FLAC supported via AVFoundation)
-    ///   - truncate: Whether to truncate to 30 seconds max (default: true)
-    public func setVoiceFromAudio(_ audioURL: URL, truncate: Bool = true) async throws {
+    ///   - maxSeconds: Maximum audio length in seconds (default: 10s to save memory)
+    public func setVoiceFromAudio(_ audioURL: URL, maxSeconds: Float = PocketTTSModel.defaultVoiceCloningMaxSeconds) async throws {
         guard let model = model else {
             throw PocketTTSError.configurationMissing("Model not loaded")
         }
 
         currentVoice = "custom"
-        state = try model.getStateForAudioFile(audioURL, truncate: truncate)
+        state = try model.getStateForAudioFile(audioURL, maxSeconds: maxSeconds)
+    }
+
+    /// Alias for setVoiceFromAudio for convenience
+    public func setVoiceFromFile(_ fileURL: URL, maxSeconds: Float = PocketTTSModel.defaultVoiceCloningMaxSeconds) async throws {
+        try await setVoiceFromAudio(fileURL, maxSeconds: maxSeconds)
+    }
+
+    /// Set voice from a pre-exported embedding file (safetensors)
+    /// This is memory-efficient as it skips the encoder entirely (~700MB vs ~1.8GB)
+    /// - Parameter embeddingURL: Path to .safetensors file with 'audio_prompt' key
+    public func setVoiceFromEmbedding(_ embeddingURL: URL) throws {
+        guard let model = model else {
+            throw PocketTTSError.configurationMissing("Model not loaded")
+        }
+
+        currentVoice = "custom"
+        state = try model.getStateForVoiceEmbedding(embeddingURL)
+    }
+
+    /// Export voice embedding from audio file to safetensors
+    /// Use this to pre-process voices for memory-efficient loading later
+    /// - Parameters:
+    ///   - audioURL: Source audio file (WAV, MP3, FLAC)
+    ///   - outputURL: Where to save the .safetensors embedding
+    ///   - maxSeconds: Maximum audio length (default: 10s)
+    public func exportVoiceEmbedding(
+        from audioURL: URL,
+        to outputURL: URL,
+        maxSeconds: Float = PocketTTSModel.defaultVoiceCloningMaxSeconds
+    ) async throws {
+        guard let model = model else {
+            throw PocketTTSError.configurationMissing("Model not loaded")
+        }
+
+        try model.exportVoiceEmbedding(from: audioURL, to: outputURL, maxSeconds: maxSeconds)
     }
 
     // MARK: - Generation

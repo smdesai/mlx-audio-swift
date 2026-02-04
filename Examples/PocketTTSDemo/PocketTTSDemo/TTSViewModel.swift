@@ -21,11 +21,43 @@ enum PocketVoice: String, CaseIterable, Identifiable {
     case cosette
     case eponine
     case azelma
+    case custom      // Voice cloning from audio file (higher memory ~1.8GB)
+    case saved       // Pre-exported voice embedding (low memory ~700MB)
 
     var id: String { rawValue }
 
     var displayName: String {
-        rawValue.capitalized
+        switch self {
+        case .custom:
+            return "Clone Voice"
+        case .saved:
+            return "Saved Voice"
+        default:
+            return rawValue.capitalized
+        }
+    }
+
+    var isCustom: Bool {
+        self == .custom
+    }
+
+    var isSaved: Bool {
+        self == .saved
+    }
+}
+
+/// Saved voice embedding info
+struct SavedVoice: Identifiable, Equatable {
+    let id: UUID
+    let name: String
+    let url: URL
+    let createdAt: Date
+
+    init(name: String, url: URL, createdAt: Date = Date()) {
+        self.id = UUID()
+        self.name = name
+        self.url = url
+        self.createdAt = createdAt
     }
 }
 
@@ -92,6 +124,12 @@ final class TTSViewModel {
 
     var text: String = "Hello world, this is a test of PocketTTS speech synthesis."
     var selectedVoice: PocketVoice = .alba
+    var customVoiceURL: URL?  // URL to audio file for voice cloning
+    var customVoiceFileName: String?  // Display name for custom voice file
+    var savedVoiceURL: URL?  // URL to pre-exported voice embedding (.safetensors)
+    var savedVoiceFileName: String?  // Display name for saved voice file
+    var savedVoices: [SavedVoice] = []  // List of available saved voices
+    var isExportingVoice: Bool = false  // Whether currently exporting a voice
     var generationState: GenerationState = .idle
     var audioURL: URL?
     var isPlaying: Bool = false
@@ -130,11 +168,38 @@ final class TTSViewModel {
     // MARK: - Computed Properties
 
     var canGenerate: Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !generationState.isStreaming
+        let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasValidVoice = hasValidVoiceSelection
+        return hasText && hasValidVoice && !generationState.isStreaming && !isExportingVoice
     }
 
     var canStream: Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !generationState.isGenerating
+        let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasValidVoice = hasValidVoiceSelection
+        return hasText && hasValidVoice && !generationState.isGenerating && !isExportingVoice
+    }
+
+    var hasValidVoiceSelection: Bool {
+        switch selectedVoice {
+        case .custom:
+            return customVoiceURL != nil
+        case .saved:
+            return savedVoiceURL != nil
+        default:
+            return true
+        }
+    }
+
+    var needsVoiceFile: Bool {
+        selectedVoice.isCustom && customVoiceURL == nil
+    }
+
+    var needsSavedVoice: Bool {
+        selectedVoice.isSaved && savedVoiceURL == nil
+    }
+
+    var canExportVoice: Bool {
+        customVoiceURL != nil && !isExportingVoice && !generationState.isBusy
     }
 
     var canPlay: Bool {
@@ -211,6 +276,126 @@ final class TTSViewModel {
         text = ""
     }
 
+    func setCustomVoiceFile(_ url: URL) {
+        customVoiceURL = url
+        customVoiceFileName = url.lastPathComponent
+        logger.info("Custom voice file set: \(url.lastPathComponent)")
+    }
+
+    func clearCustomVoiceFile() {
+        customVoiceURL = nil
+        customVoiceFileName = nil
+        // Switch back to default voice if custom was selected
+        if selectedVoice.isCustom {
+            selectedVoice = .alba
+        }
+    }
+
+    func setSavedVoice(_ voice: SavedVoice) {
+        savedVoiceURL = voice.url
+        savedVoiceFileName = voice.name
+        selectedVoice = .saved
+        logger.info("Selected saved voice: \(voice.name)")
+    }
+
+    func clearSavedVoice() {
+        savedVoiceURL = nil
+        savedVoiceFileName = nil
+        if selectedVoice.isSaved {
+            selectedVoice = .alba
+        }
+    }
+
+    /// Export current custom voice to a saved embedding
+    func exportCurrentVoice(name: String) {
+        guard let audioURL = customVoiceURL else { return }
+
+        Task {
+            await exportVoice(audioURL: audioURL, name: name)
+        }
+    }
+
+    /// Load list of saved voice embeddings from documents directory
+    func loadSavedVoices() {
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let voicesDir = documentsPath.appendingPathComponent("saved_voices")
+
+        // Create directory if needed
+        try? FileManager.default.createDirectory(at: voicesDir, withIntermediateDirectories: true)
+
+        // Find all .safetensors files
+        guard let files = try? FileManager.default.contentsOfDirectory(at: voicesDir, includingPropertiesForKeys: [.creationDateKey]) else {
+            savedVoices = []
+            return
+        }
+
+        savedVoices = files
+            .filter { $0.pathExtension == "safetensors" }
+            .compactMap { url -> SavedVoice? in
+                let name = url.deletingPathExtension().lastPathComponent
+                let createdAt = (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date()
+                return SavedVoice(name: name, url: url, createdAt: createdAt)
+            }
+            .sorted { $0.createdAt > $1.createdAt }
+
+        logger.info("Loaded \(self.savedVoices.count) saved voices")
+    }
+
+    /// Delete a saved voice
+    func deleteSavedVoice(_ voice: SavedVoice) {
+        try? FileManager.default.removeItem(at: voice.url)
+
+        // Clear selection if this was the selected voice
+        if savedVoiceURL == voice.url {
+            clearSavedVoice()
+        }
+
+        loadSavedVoices()
+        logger.info("Deleted saved voice: \(voice.name)")
+    }
+
+    private func exportVoice(audioURL: URL, name: String) async {
+        do {
+            isExportingVoice = true
+
+            // Initialize session if needed
+            try await initializeSessionIfNeeded()
+
+            guard let session = session else {
+                logger.error("Session not initialized for voice export")
+                isExportingVoice = false
+                return
+            }
+
+            // Create output path
+            let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            let voicesDir = documentsPath.appendingPathComponent("saved_voices")
+            try? FileManager.default.createDirectory(at: voicesDir, withIntermediateDirectories: true)
+
+            let safeName = name.replacingOccurrences(of: "/", with: "_")
+                .replacingOccurrences(of: ":", with: "_")
+            let outputURL = voicesDir.appendingPathComponent("\(safeName).safetensors")
+
+            // Export the voice embedding
+            try await session.exportVoiceEmbedding(from: audioURL, to: outputURL)
+
+            logger.info("Exported voice to: \(outputURL.path)")
+
+            // Reload saved voices list
+            loadSavedVoices()
+
+            // Auto-select the newly saved voice
+            if let newVoice = savedVoices.first(where: { $0.url == outputURL }) {
+                setSavedVoice(newVoice)
+            }
+
+            isExportingVoice = false
+        } catch {
+            logger.error("Failed to export voice: \(error.localizedDescription)")
+            isExportingVoice = false
+        }
+    }
+
     // MARK: - Private Methods - Generation
 
     private func startGeneration() {
@@ -220,15 +405,17 @@ final class TTSViewModel {
         // Cancel any existing playback
         stopPlayback()
 
-        // Capture voice before async work
-        let voice = selectedVoice.rawValue
+        // Capture voice settings before async work
+        let voice = selectedVoice
+        let voiceFileURL = customVoiceURL
+        let voiceEmbeddingURL = savedVoiceURL
 
         generationTask = Task {
-            await self.performGeneration(text: trimmedText, voice: voice)
+            await self.performGeneration(text: trimmedText, voice: voice, voiceFileURL: voiceFileURL, voiceEmbeddingURL: voiceEmbeddingURL)
         }
     }
 
-    private func performGeneration(text: String, voice: String) async {
+    private func performGeneration(text: String, voice: PocketVoice, voiceFileURL: URL?, voiceEmbeddingURL: URL?) async {
         do {
             // Clear previous stats
             audioDuration = nil
@@ -243,11 +430,22 @@ final class TTSViewModel {
                 return
             }
 
-            // Set voice
-            try await session.setVoice(voice)
+            // Set voice based on selection type
+            if voice.isSaved, let embeddingURL = voiceEmbeddingURL {
+                // Use pre-exported voice embedding (memory efficient ~700MB)
+                try session.setVoiceFromEmbedding(embeddingURL)
+                logger.info("Using saved voice from: \(embeddingURL.lastPathComponent)")
+            } else if voice.isCustom, let fileURL = voiceFileURL {
+                // Clone from audio file (higher memory ~1.8GB)
+                try await session.setVoiceFromFile(fileURL)
+                logger.info("Using custom voice from: \(fileURL.lastPathComponent)")
+            } else {
+                // Predefined voice
+                try await session.setVoice(voice.rawValue)
+            }
 
             generationState = .generating
-            logger.info("Generating audio for voice: \(voice)")
+            logger.info("Generating audio for voice: \(voice.displayName)")
 
             let startTime = Date()
 
@@ -307,15 +505,17 @@ final class TTSViewModel {
         // Cancel any existing playback
         stopPlayback()
 
-        // Capture voice before async work
-        let voice = selectedVoice.rawValue
+        // Capture voice settings before async work
+        let voice = selectedVoice
+        let voiceFileURL = customVoiceURL
+        let voiceEmbeddingURL = savedVoiceURL
 
         streamingTask = Task {
-            await self.performStreaming(text: trimmedText, voice: voice)
+            await self.performStreaming(text: trimmedText, voice: voice, voiceFileURL: voiceFileURL, voiceEmbeddingURL: voiceEmbeddingURL)
         }
     }
 
-    private func performStreaming(text: String, voice: String) async {
+    private func performStreaming(text: String, voice: PocketVoice, voiceFileURL: URL?, voiceEmbeddingURL: URL?) async {
         do {
             // Clear previous streaming stats
             streamingFirstChunkTime = nil
@@ -331,11 +531,22 @@ final class TTSViewModel {
                 return
             }
 
-            // Set voice
-            try await session.setVoice(voice)
+            // Set voice based on selection type
+            if voice.isSaved, let embeddingURL = voiceEmbeddingURL {
+                // Use pre-exported voice embedding (memory efficient ~700MB)
+                try session.setVoiceFromEmbedding(embeddingURL)
+                logger.info("Using saved voice from: \(embeddingURL.lastPathComponent)")
+            } else if voice.isCustom, let fileURL = voiceFileURL {
+                // Clone from audio file (higher memory ~1.8GB)
+                try await session.setVoiceFromFile(fileURL)
+                logger.info("Using custom voice from: \(fileURL.lastPathComponent)")
+            } else {
+                // Predefined voice
+                try await session.setVoice(voice.rawValue)
+            }
 
             generationState = .streaming(chunksPlayed: 0)
-            logger.info("Starting streaming for voice: \(voice)")
+            logger.info("Starting streaming for voice: \(voice.displayName)")
 
             // Set up audio engine
             try setupAudioEngine()
