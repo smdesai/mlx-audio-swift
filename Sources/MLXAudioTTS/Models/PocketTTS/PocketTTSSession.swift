@@ -152,20 +152,17 @@ public class PocketTTSSession: ObservableObject {
         state = try await model.getStateForVoice(voiceName)
     }
 
-    /// Set voice from audio file
-    public func setVoiceFromAudio(_ audioURL: URL) async throws {
+    /// Set voice from audio file for voice cloning
+    /// - Parameters:
+    ///   - audioURL: URL to audio file (WAV, MP3, FLAC supported via AVFoundation)
+    ///   - truncate: Whether to truncate to 30 seconds max (default: true)
+    public func setVoiceFromAudio(_ audioURL: URL, truncate: Bool = true) async throws {
         guard let model = model else {
             throw PocketTTSError.configurationMissing("Model not loaded")
         }
 
-        // Load audio file
-        let audio = try loadAudioFile(audioURL)
-
-        // Encode to conditioning
-        let conditioning = try encodeAudioConditioning(audio)
-
         currentVoice = "custom"
-        state = model.getStateForAudioPrompt(audioConditioning: conditioning)
+        state = try model.getStateForAudioFile(audioURL, truncate: truncate)
     }
 
     // MARK: - Generation
@@ -330,77 +327,6 @@ public class PocketTTSSession: ObservableObject {
 
     public func stopPlayback() {
         playerNode?.stop()
-    }
-
-    // MARK: - Audio Loading
-
-    private func loadAudioFile(_ url: URL) throws -> MLXArray {
-        // Load audio file using AVFoundation
-        let file = try AVAudioFile(forReading: url)
-        let format = file.processingFormat
-        let frameCount = UInt32(file.length)
-
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
-            throw PocketTTSError.generationError("Failed to create audio buffer")
-        }
-
-        try file.read(into: buffer)
-
-        // Convert to mono if stereo
-        var samples: [Float] = []
-        if let channelData = buffer.floatChannelData {
-            let channelCount = Int(format.channelCount)
-            for i in 0..<Int(buffer.frameLength) {
-                var sample: Float = 0
-                for ch in 0..<channelCount {
-                    sample += channelData[ch][i]
-                }
-                samples.append(sample / Float(channelCount))
-            }
-        }
-
-        // Resample if needed
-        if format.sampleRate != sampleRate {
-            samples = resampleAudio(samples, from: format.sampleRate, to: sampleRate)
-        }
-
-        // Shape: [1, 1, T]
-        return MLXArray(samples).reshaped([1, 1, samples.count])
-    }
-
-    private func resampleAudio(_ samples: [Float], from sourceSampleRate: Double, to targetSampleRate: Double) -> [Float] {
-        let ratio = targetSampleRate / sourceSampleRate
-        let newLength = Int(Double(samples.count) * ratio)
-        var resampled = [Float](repeating: 0, count: newLength)
-
-        for i in 0..<newLength {
-            let srcIndex = Double(i) / ratio
-            let srcIndexInt = Int(srcIndex)
-            let frac = Float(srcIndex - Double(srcIndexInt))
-
-            if srcIndexInt + 1 < samples.count {
-                resampled[i] = samples[srcIndexInt] * (1 - frac) + samples[srcIndexInt + 1] * frac
-            } else if srcIndexInt < samples.count {
-                resampled[i] = samples[srcIndexInt]
-            }
-        }
-
-        return resampled
-    }
-
-    private func encodeAudioConditioning(_ audio: MLXArray) throws -> MLXArray {
-        guard let model = model else {
-            throw PocketTTSError.configurationMissing("Model not loaded")
-        }
-
-        // Encode through Mimi encoder
-        let encoded = model.mimi.encodeToLatent(audio)
-
-        // Transpose and project
-        let latents = encoded.transposed(0, 2, 1).asType(.float32)
-        let conditioning = MLX.matmul(latents, model.speakerProjWeight.transposed())
-
-        return conditioning
     }
 
     // MARK: - Cleanup

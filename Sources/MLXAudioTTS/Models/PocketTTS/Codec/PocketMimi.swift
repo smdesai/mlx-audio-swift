@@ -891,9 +891,9 @@ public final class PocketId: Module {
 }
 
 public final class PocketLayerScale: Module {
-    public var scale: MLXArray
+    @ModuleInfo public var scale: MLXArray
     public init(dim: Int) {
-        self.scale = MLXArray.ones([dim])
+        self._scale = ModuleInfo(wrappedValue: MLXArray.ones([dim]))
     }
 
     public func callAsFunction(_ xs: MLXArray) -> MLXArray {
@@ -1039,7 +1039,36 @@ public final class PocketAttention: Module {
             v = split(v, indices: [start], axis: 2)[1]
         }
 
-        var out = scaledDotProductAttention(queries: q, keys: k, values: v, scale: scale, mask: mask)
+        // Create causal attention mask with context window (matching Python implementation)
+        // After slicing, k has currentKLen positions
+        // q positions: [offset, offset+1, ..., offset+t-1]
+        // k positions after slicing: [offset+t-currentKLen, ..., offset+t-1]
+        let currentKLen = k.shape[2]
+        let offset = cache.offset
+
+        // Build position arrays for mask computation
+        // pos_q shape: [t, 1], pos_k shape: [1, currentKLen]
+        let posQ = MLXArray(Int32(offset)..<Int32(offset + t)).reshaped([t, 1])
+        let kStartPos = offset + t - currentKLen
+        let posK = MLXArray(Int32(kStartPos)..<Int32(kStartPos + currentKLen)).reshaped([1, currentKLen])
+
+        // delta[i,j] = pos_q[i] - pos_k[j] = query position - key position
+        let delta = posQ - posK  // [t, currentKLen]
+
+        // Attention mask: (Python's attn_bias)
+        // 1. pos_k >= 0: valid positions only
+        // 2. delta >= 0: causal (query only attends to same or earlier positions)
+        // 3. delta < context: within context window
+        // Break up expression to help Swift compiler
+        let validPos: MLXArray = posK .>= 0
+        let causal: MLXArray = delta .>= 0
+        let withinContext: MLXArray = delta .< Int32(cfg.context)
+        let causalMask = validPos .&& causal .&& withinContext
+
+        // Expand to [1, 1, t, currentKLen] for broadcasting with [b, h, t, currentKLen] scores
+        let expandedMask = causalMask.reshaped([1, 1, t, currentKLen])
+
+        var out = scaledDotProductAttention(queries: q, keys: k, values: v, scale: scale, mask: expandedMask)
         out = swappedAxes(out, 1, 2).reshaped([b, t, hd])
         return out_proj(out)
     }
@@ -1096,7 +1125,9 @@ public final class PocketTransformerLayer: Module {
     ) -> MLXArray {
         var x = xs
         var n1 = norm1(x)
+
         n1 = self_attn(n1, cache: cache)
+
         if let ls = layer_scale_1 as? PocketLayerScale {
             x = x + ls(n1)
         } else {

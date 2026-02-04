@@ -81,8 +81,10 @@ public class PocketTTSModel: Module, @unchecked Sendable {
     /// Encode audio prompt to conditioning
     private func encodeAudio(_ audio: MLXArray) -> MLXArray {
         let encoded = mimi.encodeToLatent(audio)
+
         // Transpose: [B, D, T] -> [B, T, D]
         let latents = encoded.transposed(0, 2, 1).asType(.float32)
+
         // Project to transformer dimension
         let conditioning = MLX.matmul(latents, speakerProjWeight.transposed())
         return conditioning
@@ -156,6 +158,37 @@ public class PocketTTSModel: Module, @unchecked Sendable {
     }
 
     // MARK: - Voice Conditioning
+
+    /// Get state for voice cloning from an audio file
+    /// - Parameters:
+    ///   - audioURL: URL to audio file (WAV, MP3, FLAC supported via AVFoundation)
+    ///   - truncate: Whether to truncate to 30 seconds max (default: true)
+    /// - Returns: PocketTTSState primed with the speaker's voice characteristics
+    public func getStateForAudioFile(_ audioURL: URL, truncate: Bool = true) throws -> PocketTTSState {
+        // 1. Load audio file
+        let (originalSampleRate, audioData) = try loadAudioArray(from: audioURL)
+        var samples = audioData.asArray(Float.self)
+
+        // 2. Truncate to 30 seconds if requested
+        if truncate {
+            samples = truncateAudioSamples(samples, maxSeconds: 30.0, sampleRate: originalSampleRate)
+        }
+
+        // 3. Resample to model sample rate (24kHz)
+        let targetSampleRate = Double(optionalSampleRate ?? 24000)
+        if Double(originalSampleRate) != targetSampleRate {
+            samples = resampleAudioLinear(samples, from: Double(originalSampleRate), to: targetSampleRate)
+        }
+
+        // 4. Shape to [1, 1, T] for encoder
+        let audio = MLXArray(samples).reshaped([1, 1, samples.count])
+
+        // 5. Encode to conditioning
+        let conditioning = encodeAudio(audio)
+
+        // 6. Return primed state
+        return getStateForAudioPrompt(audioConditioning: conditioning)
+    }
 
     /// Get state initialized with audio prompt conditioning
     public func getStateForAudioPrompt(audioConditioning: MLXArray) -> PocketTTSState {

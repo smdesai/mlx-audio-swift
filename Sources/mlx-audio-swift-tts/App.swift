@@ -38,6 +38,7 @@ enum App {
                 model: args.model,
                 text: args.text,
                 voice: args.voice,
+                voiceFile: args.voiceFile,
                 outputPath: args.outputPath,
                 refAudioPath: args.refAudioPath,
                 refText: args.refText,
@@ -56,6 +57,7 @@ enum App {
         model: String,
         text: String,
         voice: String?,
+        voiceFile: String?,
         outputPath: String?,
         refAudioPath: String?,
         refText: String?,
@@ -94,18 +96,29 @@ enum App {
             refAudio = nil
         }
 
-        let audioData = try await loadedModel.generate(
-            text: text,
-            voice: voice,
-            refAudio: refAudio,
-            refText: refText,
-            language: nil,
-            generationParameters: GenerateParameters(
-                maxTokens: maxTokens,
-                temperature: temperature,
-                topP: topP
-            )
-        ).asArray(Float.self)
+        // Handle voice cloning for PocketTTS models
+        let audioData: [Float]
+        if let voiceFilePath = voiceFile, let pocketModel = loadedModel as? PocketTTSModel {
+            let voiceURL = resovleURL(path: voiceFilePath)
+            print("Loading voice from: \(voiceURL.path)")
+            let state = try pocketModel.getStateForAudioFile(voiceURL)
+            pocketModel.temp = temperature
+            let audio = pocketModel.generateAudio(state: state, text: text)
+            audioData = audio.asArray(Float.self)
+        } else {
+            audioData = try await loadedModel.generate(
+                text: text,
+                voice: voice,
+                refAudio: refAudio,
+                refText: refText,
+                language: nil,
+                generationParameters: GenerateParameters(
+                    maxTokens: maxTokens,
+                    temperature: temperature,
+                    topP: topP
+                )
+            ).asArray(Float.self)
+        }
 
         let outputURL = makeOutputURL(outputPath: outputPath)
         let sampleRate = Double(loadedModel.sampleRate)
@@ -176,6 +189,7 @@ struct CLI {
     let model: String
     let text: String
     let voice: String?
+    let voiceFile: String?
     let outputPath: String?
     let refAudioPath: String?
     let refText: String?
@@ -186,6 +200,7 @@ struct CLI {
     static func parse() throws -> CLI {
         var text: String?
         var voice: String? = nil
+        var voiceFile: String? = nil
         var outputPath: String? = nil
         var model = "Marvis-AI/marvis-tts-250m-v0.2-MLX-8bit"
         var refAudioPath: String? = nil
@@ -203,6 +218,9 @@ struct CLI {
             case "--voice", "-v":
                 guard let v = it.next() else { throw CLIError.missingValue(arg) }
                 voice = v
+            case "--voice-file", "-vf":
+                guard let v = it.next() else { throw CLIError.missingValue(arg) }
+                voiceFile = v
             case "--model":
                 guard let v = it.next() else { throw CLIError.missingValue(arg) }
                 model = v
@@ -247,6 +265,7 @@ struct CLI {
             model: model,
             text: finalText,
             voice: voice,
+            voiceFile: voiceFile,
             outputPath: outputPath,
             refAudioPath: refAudioPath,
             refText: refText,
@@ -257,22 +276,28 @@ struct CLI {
     }
 
     static func printUsage() {
-        let exe = (CommandLine.arguments.first as NSString?)?.lastPathComponent ?? "marvis-tts-cli"
+        let exe = (CommandLine.arguments.first as NSString?)?.lastPathComponent ?? "mlx-audio-swift-tts"
         print("""
         Usage:
           \(exe) --text "Hello world" [--voice conversational_b] [--model <hf-repo>] [--output <path>] [--ref_audio <path>] [--ref_text <string>] [--max_tokens <int>] [--temperature <float>] [--top_p <float>]
 
         Options:
           -t, --text <string>           Text to synthesize (required if not passed as trailing arg)
-          -v, --voice <name>            Voice id
+          -v, --voice <name>            Voice id (predefined voice name)
+          -vf, --voice-file <path>      Path to audio file for voice cloning (PocketTTS only, WAV/MP3/FLAC)
               --model <repo>            HF repo id. Default: Marvis-AI/marvis-tts-250m-v0.2-MLX-8bit
           -o, --output <path>           Output WAV path. Default: ./output.wav
-              --ref_audio <path>       Path to reference audio
-              --ref_text <string>      Caption for reference audio
-              --max_tokens <int>       Maximum number of tokens to generate. Default: 1200
-              --temperature <float>    Sampling temperature. Default: 0.7
-              --top_p <float>          Top-p sampling. Default: 0.9
+              --ref_audio <path>        Path to reference audio
+              --ref_text <string>       Caption for reference audio
+              --max_tokens <int>        Maximum number of tokens to generate. Default: 1200
+              --temperature <float>     Sampling temperature. Default: 0.7
+              --top_p <float>           Top-p sampling. Default: 0.9
           -h, --help                    Show this help
+
+        Voice Cloning (PocketTTS):
+          Use --voice-file to clone a voice from an audio file. The audio will be
+          truncated to 30 seconds and resampled to 24kHz if needed.
+          Example: \(exe) --model smdesai/pocket-tts --text "Hello" --voice-file voice.wav
         """)
     }
 }

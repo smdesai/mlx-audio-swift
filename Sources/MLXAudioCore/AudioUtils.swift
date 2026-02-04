@@ -2,6 +2,60 @@ import AVFoundation
 import Foundation
 import MLX
 
+// MARK: - Audio Resampling
+
+/// Resample audio using linear interpolation
+/// - Parameters:
+///   - samples: Input audio samples
+///   - sourceSampleRate: Source sample rate
+///   - targetSampleRate: Target sample rate
+/// - Returns: Resampled audio samples
+public func resampleAudioLinear(
+    _ samples: [Float],
+    from sourceSampleRate: Double,
+    to targetSampleRate: Double
+) -> [Float] {
+    guard sourceSampleRate != targetSampleRate else { return samples }
+
+    let ratio = targetSampleRate / sourceSampleRate
+    let newLength = Int(Double(samples.count) * ratio)
+    var resampled = [Float](repeating: 0, count: newLength)
+
+    for i in 0..<newLength {
+        let srcIndex = Double(i) / ratio
+        let srcIndexInt = Int(srcIndex)
+        let frac = Float(srcIndex - Double(srcIndexInt))
+
+        if srcIndexInt + 1 < samples.count {
+            resampled[i] = samples[srcIndexInt] * (1 - frac) + samples[srcIndexInt + 1] * frac
+        } else if srcIndexInt < samples.count {
+            resampled[i] = samples[srcIndexInt]
+        }
+    }
+
+    return resampled
+}
+
+// MARK: - Audio Truncation
+
+/// Truncate audio samples to maximum duration
+/// - Parameters:
+///   - samples: Input audio samples
+///   - maxSeconds: Maximum duration in seconds (default: 30.0)
+///   - sampleRate: Sample rate of the audio
+/// - Returns: Truncated samples (or original if within limit)
+public func truncateAudioSamples(
+    _ samples: [Float],
+    maxSeconds: Float = 30.0,
+    sampleRate: Int
+) -> [Float] {
+    let maxSamples = Int(maxSeconds * Float(sampleRate))
+    guard samples.count > maxSamples else { return samples }
+    return Array(samples.prefix(maxSamples))
+}
+
+// MARK: - AudioUtils Class
+
 public class AudioUtils {
   enum AudioUtilsErrors: Error {
     case cannotCreateAVAudioFormat
